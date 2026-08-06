@@ -23,6 +23,7 @@ import json
 import os
 import statistics
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -30,9 +31,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 REGION_ID = int(os.environ.get("REGION_ID", "10000002"))       # The Forge
 OUT_DIR = os.environ.get("OUT_DIR", "market")
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "16"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "30"))
 MIN_TYPES = int(os.environ.get("MIN_TYPES", "5000"))           # sanity floor
+# Fraction of requested types allowed to hard-fail before the run is rejected.
+MAX_FAIL_RATIO = float(os.environ.get("MAX_FAIL_RATIO", "0.01"))
 
 BASE = "https://esi.evetech.net/latest/markets/%d/history/" % REGION_ID
 USER_AGENT = os.environ.get(
@@ -41,21 +44,70 @@ USER_AGENT = os.environ.get(
 
 HISTORY_COLUMNS = ["typeID", "avgDailyVolume", "medianPrice"]
 
+# ---------------------------------------------------------------------------
+# ESI error limiting.
+#
+# ESI allows ~100 errors per 60s window across a client and answers with HTTP
+# 420 once that is spent. At this volume (~19k requests) a naive sweep trips it
+# and then keeps hammering, so retries expire and types drop out silently —
+# which is worse than it sounds, because a dropped type is indistinguishable
+# from "never traded" downstream, and it quietly removes real items from the
+# ranking.
+#
+# Every response carries X-ESI-Error-Limit-Remain / -Reset. The gate below is
+# process-wide: when any thread sees the budget running low (or gets a 420),
+# ALL threads park until the window resets. Backing off together is the only
+# thing that actually works — per-request retries just re-spend the same budget.
+# ---------------------------------------------------------------------------
 
-def fetch_history(type_id, retries=4):
-    """Trailing-window {avgDailyVolume, medianPrice} for one type, or None.
+_gate_lock = threading.Lock()
+_resume_at = 0.0
+_throttle_events = 0
 
-    None means "ESI has no history for this type" — a 404, or an empty series.
-    Unlike the order sweep, a hard failure here degrades rather than aborts:
-    one missing type drops one row from a ranking, where a missing ORDER page
-    would silently corrupt every spread in the snapshot.
+
+def _park_if_throttled():
+    """Block while a global backoff window is open."""
+    while True:
+        with _gate_lock:
+            wait = _resume_at - time.time()
+        if wait <= 0:
+            return
+        time.sleep(min(wait, 5))
+
+
+def _note_limit(headers, throttled=False):
+    """Open a global backoff window when ESI's error budget is nearly spent."""
+    global _resume_at, _throttle_events
+    try:
+        remain = int(headers.get("X-ESI-Error-Limit-Remain", "100"))
+        reset = int(headers.get("X-ESI-Error-Limit-Reset", "60"))
+    except (TypeError, ValueError):
+        remain, reset = (0, 60) if throttled else (100, 60)
+    if throttled or remain < 20:
+        with _gate_lock:
+            _resume_at = max(_resume_at, time.time() + reset + 1)
+            _throttle_events += 1
+        print("  error budget low (remain=%s) — pausing %ss" % (remain, reset + 1), flush=True)
+
+
+def fetch_history(type_id, retries=5):
+    """Trailing-window [typeID, avgDailyVolume, medianPrice], or a failure marker.
+
+    Returns:
+      list  -> usable history
+      None  -> ESI genuinely has no history for this type (404 or empty series)
+      False -> could not be fetched. Counted separately and, past a threshold,
+               fails the run. Conflating this with None would let an ESI outage
+               masquerade as "the market stopped trading these items".
     """
     url = "%s?type_id=%d&datasource=tranquility" % (BASE, type_id)
     last = None
     for attempt in range(retries):
+        _park_if_throttled()
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
+                _note_limit(resp.headers)
                 data = json.loads(resp.read().decode("utf-8"))
             if not data:
                 return None
@@ -66,14 +118,15 @@ def fetch_history(type_id, retries=4):
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
+            _note_limit(e.headers, throttled=(e.code == 420))
             last = e
             if e.code not in (420, 429, 500, 502, 503, 504):
                 break
         except Exception as e:
             last = e
         time.sleep(2 ** attempt)
-    print("  type %d failed: %s" % (type_id, last), flush=True)
-    return None
+    print("  type %d FAILED: %s" % (type_id, last), flush=True)
+    return False
 
 
 def main():
@@ -88,7 +141,22 @@ def main():
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
         results = list(pool.map(fetch_history, type_ids))
 
-    rows = [r for r in results if r is not None]
+    rows = [r for r in results if isinstance(r, list)]
+    no_history = sum(1 for r in results if r is None)
+    failed = sum(1 for r in results if r is False)
+
+    print("usable=%d noHistory=%d failed=%d throttleEvents=%d" % (
+        len(rows), no_history, failed, _throttle_events), flush=True)
+
+    # A failure is not the same as "no history": failures are ESI refusing us,
+    # and downstream they are indistinguishable from an untraded item. Past a
+    # small threshold that quietly deletes real items from the ranking, so the
+    # run is rejected rather than published.
+    if failed > MAX_FAIL_RATIO * len(type_ids):
+        raise SystemExit(
+            "%d of %d types failed to fetch (>%.0f%%) — refusing to publish a holed dataset"
+            % (failed, len(type_ids), MAX_FAIL_RATIO * 100)
+        )
     if len(rows) < MIN_TYPES:
         raise SystemExit(
             "only %d types with history (floor %d) — refusing to publish" % (len(rows), MIN_TYPES)
@@ -110,6 +178,9 @@ def main():
         "historyGeneratedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "historyTypes": len(rows),
         "historyRequested": len(type_ids),
+        "historyNoData": no_history,
+        "historyFailed": failed,
+        "historyThrottleEvents": _throttle_events,
         "historyWindowDays": WINDOW_DAYS,
         "historyColumns": HISTORY_COLUMNS,
         "historySeconds": round(time.time() - started, 1),
