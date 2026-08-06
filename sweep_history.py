@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# sweep_history.py — v1.0 — Last updated 2026-08-06
+# sweep_history.py — v1.1 — Last updated 2026-08-06
 #
 # Trailing-30-day traded volume and median price per type, from ESI's public
 # market history endpoint. One request per type — ~18,800 of them — which is
@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 REGION_ID = int(os.environ.get("REGION_ID", "10000002"))       # The Forge
 OUT_DIR = os.environ.get("OUT_DIR", "market")
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "16"))
 WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "30"))
 MIN_TYPES = int(os.environ.get("MIN_TYPES", "5000"))           # sanity floor
 # Fraction of requested types allowed to hard-fail before the run is rejected.
@@ -129,6 +129,31 @@ def fetch_history(type_id, retries=5):
     return False
 
 
+def load_known_empty():
+    """Types ESI had no history for last run, minus this run's recheck slice.
+
+    ESI's error limiter counts 4xx, and "no history" IS a 404 — so the ~1,400
+    untraded types on the book spend the entire error budget roughly fourteen
+    times over, and the sweep spends most of its wall clock parked in backoff
+    it inflicted on itself. Remembering them turns a ~30-minute job into a
+    few minutes.
+
+    A seventh of the list is rechecked each day so an item that starts trading
+    reappears within a week, rather than being written off permanently.
+    """
+    path = os.path.join(OUT_DIR, "noHistoryTypes.json")
+    if not os.path.exists(path):
+        return set(), 0
+    try:
+        with open(path) as f:
+            known = sorted(set(json.load(f)))
+    except ValueError:
+        return set(), 0
+    slice_idx = int(time.strftime("%j")) % 7
+    recheck = {t for i, t in enumerate(known) if i % 7 == slice_idx}
+    return set(known) - recheck, len(recheck)
+
+
 def main():
     started = time.time()
     snapshot_path = os.path.join(OUT_DIR, "jitaSnapshot.json")
@@ -136,26 +161,37 @@ def main():
         raise SystemExit("%s missing — run the order sweep first" % snapshot_path)
     with open(snapshot_path) as f:
         type_ids = [row[0] for row in json.load(f)]
-    print("types to fetch: %d" % len(type_ids), flush=True)
+
+    skip, rechecking = load_known_empty()
+    to_fetch = [t for t in type_ids if t not in skip]
+    print("types on book: %d  fetching: %d  skipping known-empty: %d (rechecking %d)" % (
+        len(type_ids), len(to_fetch), len(skip), rechecking), flush=True)
 
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
-        results = list(pool.map(fetch_history, type_ids))
+        results = list(pool.map(fetch_history, to_fetch))
 
     rows = [r for r in results if isinstance(r, list)]
-    no_history = sum(1 for r in results if r is None)
+    empty_now = {t for t, r in zip(to_fetch, results) if r is None}
+    no_history = len(empty_now)
     failed = sum(1 for r in results if r is False)
 
-    print("usable=%d noHistory=%d failed=%d throttleEvents=%d" % (
-        len(rows), no_history, failed, _throttle_events), flush=True)
+    # Carry the skipped ones forward: they were not retested, so their status is
+    # unchanged. A rechecked type that now HAS history simply drops out.
+    still_empty = sorted(empty_now | (skip & set(type_ids)))
+    with open(os.path.join(OUT_DIR, "noHistoryTypes.json"), "w") as f:
+        json.dump(still_empty, f, separators=(",", ":"))
+
+    print("usable=%d noHistory=%d failed=%d throttleEvents=%d knownEmptyCarried=%d" % (
+        len(rows), no_history, failed, _throttle_events, len(still_empty)), flush=True)
 
     # A failure is not the same as "no history": failures are ESI refusing us,
     # and downstream they are indistinguishable from an untraded item. Past a
     # small threshold that quietly deletes real items from the ranking, so the
     # run is rejected rather than published.
-    if failed > MAX_FAIL_RATIO * len(type_ids):
+    if failed > MAX_FAIL_RATIO * len(to_fetch):
         raise SystemExit(
             "%d of %d types failed to fetch (>%.0f%%) — refusing to publish a holed dataset"
-            % (failed, len(type_ids), MAX_FAIL_RATIO * 100)
+            % (failed, len(to_fetch), MAX_FAIL_RATIO * 100)
         )
     if len(rows) < MIN_TYPES:
         raise SystemExit(
@@ -177,8 +213,10 @@ def main():
     meta.update({
         "historyGeneratedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "historyTypes": len(rows),
-        "historyRequested": len(type_ids),
+        "historyOnBook": len(type_ids),
+        "historyRequested": len(to_fetch),
         "historyNoData": no_history,
+        "historyKnownEmpty": len(still_empty),
         "historyFailed": failed,
         "historyThrottleEvents": _throttle_events,
         "historyWindowDays": WINDOW_DAYS,
