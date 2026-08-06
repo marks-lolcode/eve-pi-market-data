@@ -1,0 +1,55 @@
+# market-history.yml — v1.0 — Last updated 2026-08-06
+#
+# Daily trailing-30-day traded volume and median price for every type currently
+# on the Jita 4-4 book. Runs daily because ESI's history data only changes
+# daily — and because it costs one request per type (~18,800 of them), which is
+# exactly why this cannot run inside Apps Script.
+#
+# Depends on the order sweep: it reads market/jitaSnapshot.json for the type
+# list, so it checks out whatever the hourly job last published, adds
+# jitaHistory.json alongside it, and republishes both.
+#
+# Shares the market-data-publish concurrency group with market-orders.yml so
+# the two jobs can never force-push the data branch over each other.
+
+name: Refresh Jita history
+
+on:
+  schedule:
+    - cron: "40 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-data-publish
+  cancel-in-progress: false
+
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch current published data
+        run: |
+          git fetch origin data --depth=1
+          git checkout origin/data -- market/
+          ls -la market/
+
+      - name: Sweep history
+        run: python3 sweep_history.py
+
+      - name: Publish to data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan publish
+          git reset
+          git add -f market/
+          git commit -m "Jita history $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f origin publish:data
+
+# End of market-history.yml

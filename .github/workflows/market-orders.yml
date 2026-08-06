@@ -1,0 +1,64 @@
+# market-orders.yml — v1.0 — Last updated 2026-08-06
+#
+# Hourly sweep of Jita 4-4's order book, published as compact JSON for the
+# EVE PI Manager v2 Apps Script to import in a single fetch.
+#
+# Cadence: ESI regenerates this data every 300s, but GitHub's schedule has a
+# 5-minute floor and does not guarantee on-time execution (runs are routinely
+# delayed 10-20 minutes at peak). Anything under ~15 minutes is unreliable no
+# matter what the cron says, so hourly is the honest cadence — and structural
+# trading opportunities do not move meaningfully within an hour. Use
+# workflow_dispatch when you want it now.
+#
+# The :07 offset is deliberate: crons scheduled on the hour are the most
+# heavily contended and the most delayed.
+#
+# Published to an ORPHAN `data` branch, force-pushed, so the history stays at
+# exactly one commit. Committing ~0.8MB hourly to master would add roughly 7GB
+# of git objects a year.
+
+name: Refresh Jita orders
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-data-publish
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bring the previously published files across so the history data written
+      # by the daily job survives an hourly order refresh.
+      - name: Fetch current published data
+        run: |
+          git fetch origin data --depth=1 || echo "no data branch yet — first run"
+          if git rev-parse --verify origin/data >/dev/null 2>&1; then
+            git checkout origin/data -- market/ || true
+          fi
+          ls -la market/ 2>/dev/null || echo "(no existing market/)"
+
+      - name: Sweep orders
+        run: python3 sweep_orders.py
+
+      - name: Publish to data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan publish
+          git reset
+          git add -f market/
+          git commit -m "Jita orders $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f origin publish:data
+
+# End of market-orders.yml
