@@ -98,6 +98,18 @@ reappears within a week instead of being written off permanently.
 
 Both accept `workflow_dispatch` for an on-demand refresh.
 
+The two workflows share a `market-data-publish` concurrency group. Each run
+force-pushes the whole `market/` directory as it looked at *its* checkout, so
+two overlapping runs would have the later one revert the earlier one's file —
+serializing them is what prevents that. A queued run then starts fresh after the
+first finishes, and picks up the newly published data.
+
+The price is that GitHub keeps only one run queued per group: dispatch a third
+while two are outstanding and the middle one is **cancelled before any step
+runs**. That looks alarming in the Actions list but is harmless — the next
+scheduled run covers it, and Apps Script warns separately when the published
+data goes stale. In normal operation the two never overlap.
+
 ## Failure policy
 
 **A partial order sweep is never published.** Any page that cannot be fetched
