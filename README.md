@@ -76,6 +76,19 @@ Provenance and a freshness stamp for both files: `generatedAt`,
 orders, and sweep durations. Consumers should read this first and skip the
 download when `generatedAt` has not moved.
 
+### `noHistoryTypes.json`
+
+Bookkeeping, not a consumer file: the types ESI had no history for last run.
+
+ESI's error limiter counts 4xx, and "no history" is a **404** — so the ~1,400
+untraded types on the book spend the 100-errors-per-60-seconds budget about
+fourteen times over, and the sweep ends up parked in backoff it inflicted on
+itself. The first full run took 21.7 minutes, most of it waiting. Remembering
+them removes that cost.
+
+A seventh of the list is rechecked each day, so an item that starts trading
+reappears within a week instead of being written off permanently.
+
 ## Schedules
 
 | Workflow | Cron | Why |
