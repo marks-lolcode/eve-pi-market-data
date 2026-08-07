@@ -1,4 +1,10 @@
-# market-orders.yml — v1.0 — Last updated 2026-08-06
+# market-orders.yml — v1.1 — Last updated 2026-08-07
+#
+# v1.1: the sweep also publishes jitaDepth.json (20 price levels per side), and
+# a second step narrows the book to reproCandidates.json. Both exist because
+# Apps Script gets 6 minutes per execution: sizing a reprocessing trade needs a
+# ladder walk per candidate and a bid ladder per output material, which does not
+# fit over 18.8k types but fits easily over a few hundred.
 #
 # Hourly sweep of Jita 4-4's order book, published as compact JSON for the
 # EVE PI Manager v2 Apps Script to import in a single fetch.
@@ -50,6 +56,13 @@ jobs:
 
       - name: Sweep orders
         run: python3 sweep_orders.py
+
+      # Reads the snapshot just written plus the SDE slice from the sibling
+      # repo. A failure here fails the job before the publish step, which is
+      # deliberate: a fresh snapshot beside a stale candidate list would send
+      # the sheet after types whose prices have already moved.
+      - name: Build reprocessing candidates
+        run: python3 build_repro_candidates.py
 
       - name: Publish to data branch
         run: |

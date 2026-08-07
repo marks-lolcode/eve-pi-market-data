@@ -34,7 +34,9 @@ commit each run so the repository never accumulates history:
 
 ```
 https://raw.githubusercontent.com/marks-lolcode/eve-pi-market-data/data/market/jitaSnapshot.json
+https://raw.githubusercontent.com/marks-lolcode/eve-pi-market-data/data/market/jitaDepth.json
 https://raw.githubusercontent.com/marks-lolcode/eve-pi-market-data/data/market/jitaHistory.json
+https://raw.githubusercontent.com/marks-lolcode/eve-pi-market-data/data/market/reproCandidates.json
 https://raw.githubusercontent.com/marks-lolcode/eve-pi-market-data/data/market/meta.json
 ```
 
@@ -57,6 +59,67 @@ spread is one player's one-unit order — something an order *count* cannot catc
 
 Only orders at **Jita IV-4** (station 60003760) are kept. That is 80.7% of all
 Forge orders, and it is the book you actually trade against.
+
+### `jitaDepth.json`
+
+The best 20 price levels per side per type, one row per type:
+
+```
+[typeID, buyLadder, sellLadder]      # "price:qty|price:qty|…", best price first
+```
+
+The snapshot tells you the best price and how much sits *at* it. That is enough
+to rank a spread and not enough to size a trade: buy 500 units of something
+whose best ask covers 3 and your realised cost is nowhere near `minSell`. Any
+consumer that recommends a **quantity** has to walk a ladder.
+
+Twenty levels covers essentially every book here — 327k orders over 18.8k types
+is ~17 orders per type across both sides, and levels aggregate below that. Only
+mineral-scale books run deeper, and a truncated ladder leaves the consumer with
+an unfilled remainder, i.e. pessimistic, which is the safe direction.
+
+Prices are rounded to 2 dp and re-summed after rounding. `maxBuy`/`minSell` on
+the snapshot are **not** rounded, so a sub-cent spread can show a ladder whose
+best bid equals its best ask — read the snapshot, not the ladder, for a
+crossed-book check.
+
+Aggregating by price destroys `min_volume`, so buy volume is counted **only from
+orders with `min_volume == 1`** and the discarded total is published as
+`depthMinVolumeExcluded`. Treating a `min_volume: 5000` order as freely fillable
+would be an optimistic error, and everything else here leans pessimistic.
+
+A separate file rather than two more snapshot columns: every market feature
+imports the snapshot and most never size a quantity, so the station-trading path
+stays exactly as fast as it was.
+
+### `reproCandidates.json`
+
+The types that could possibly be worth buying, reprocessing, and selling the
+materials into buy orders:
+
+```
+[typeID, portionSize, bestAsk, materialValue, ceilingProfit, materialCount]
+```
+
+`ceilingProfit` is `(Σ material quantity × best bid) − (best ask × portionSize)`
+— the profit at **100% yield and zero taxes**, which is impossible and therefore
+a true upper bound. A negative ceiling cannot be rescued by any skill level,
+standing or tax rate, so dropping it is safe in a way no tuned threshold is.
+
+This exists purely for Apps Script's 6-minute execution cap. The real solve
+needs an ask ladder per candidate plus a bid ladder per output material; over
+18.8k types that does not fit, over a few hundred it fits easily. Measured on
+the live book: **6,854 considered → 715 kept (10.4%), 28 KB.**
+
+The split is deliberate — this file holds only the arithmetic that does not
+depend on the player. Real yield, the per-batch floor, taxes and order sizing
+stay in the sheet, where the config knobs and the test suite are. Yield cannot
+be applied afterwards anyway: output is `floor(quantity × yield)` *per batch*,
+so the yield has to be inside the computation.
+
+`candidatesConsidered` and `candidatesKept` go into `meta.json`. If kept ever
+approaches considered, the filter has stopped filtering and the consumer is
+about to run out of execution time — the build step warns when it exceeds 50%.
 
 ### `jitaHistory.json`
 
@@ -130,12 +193,18 @@ ranking, so it degrades instead of aborting.
 Python 3, standard library only:
 
 ```sh
-python3 sweep_orders.py     # writes market/jitaSnapshot.json + meta.json
-python3 sweep_history.py    # needs the snapshot; writes market/jitaHistory.json
+python3 sweep_orders.py            # writes jitaSnapshot.json + jitaDepth.json + meta.json
+python3 build_repro_candidates.py  # needs the snapshot; writes reproCandidates.json
+python3 sweep_history.py           # needs the snapshot; writes jitaHistory.json
 ```
 
+`build_repro_candidates.py` fetches the SDE slice from the sibling repo but
+needs no ESI access, so it can be re-run against an already-published snapshot
+without touching the market at all — useful for tuning without a full sweep.
+
 Environment overrides: `REGION_ID`, `STATION_ID`, `OUT_DIR`, `CONCURRENCY`,
-`MIN_TYPES`, `WINDOW_DAYS`, `ESI_USER_AGENT`.
+`MIN_TYPES`, `WINDOW_DAYS`, `DEPTH_LEVELS`, `SDE_BASE`, `EXCLUDED_CATEGORIES`,
+`MIN_CEILING_ISK`, `ESI_USER_AGENT`.
 
 ## Data source
 
