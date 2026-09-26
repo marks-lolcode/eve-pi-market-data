@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-09-26T19:51:21Z",
+  "regionID": 10000002,
+  "stationID": 60003760,
+  "pages": 406,
+  "pagesEmpty": 0,
+  "ordersSeen": 405681,
+  "ordersKept": 327577,
+  "types": 18778,
+  "snapshotColumns": [
+    "typeID",
+    "maxBuy",
+    "minSell",
+    "buyVolume",
+    "sellVolume",
+    "buyOrders",
+    "sellOrders",
+    "topBuyVolume",
+    "topSellVolume",
+    "topBuyAgeDays",
+    "topSellAgeDays"
+  ],
+  "sweepSeconds": 19.1,
+  "historyGeneratedAt": "2026-09-26T08:55:18Z",
+  "historyTypes": 17434,
+  "historyRequested": 17630,
+  "historyNoData": 194,
+  "historyFailed": 2,
+  "historyThrottleEvents": 0,
+  "historyWindowDays": 30,
+  "historyColumns": [
+    "typeID",
+    "avgDailyVolume",
+    "medianPrice"
+  ],
+  "historySeconds": 348.4,
+  "historyOnBook": 18776,
+  "historyKnownEmpty": 1340,
+  "depthColumns": [
+    "typeID",
+    "buyLadder",
+    "sellLadder"
+  ],
+  "depthLevels": 20,
+  "depthGeneratedAt": "2026-09-26T19:51:21Z",
+  "depthMinVolumeExcluded": 794682382,
+  "candidateColumns": [
+    "typeID",
+    "portionSize",
+    "bestAsk",
+    "materialValue",
+    "ceilingProfit",
+    "materialCount"
+  ],
+  "candidatesGeneratedAt": "2026-09-26T19:51:23Z",
+  "candidatesConsidered": 6867,
+  "candidatesKept": 782
+}
