@@ -55,7 +55,9 @@ jobs:
           ls -la market/ 2>/dev/null || echo "(no existing market/)"
 
       - name: Sweep orders
-        run: python3 sweep_orders.py
+        # pi_orders_archive.py runs sweep_orders.main() unchanged and also
+        # writes archive/orders/YYYY/MM/DD/HH.json.gz from the same pages.
+        run: python3 pi_orders_archive.py
 
       # Reads the snapshot just written plus the SDE slice from the sibling
       # repo. A failure here fails the job before the publish step, which is
@@ -73,5 +75,43 @@ jobs:
           git add -f market/
           git commit -m "Jita orders $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -f origin publish:data
+
+      # Appends this hour's PI order dump to the append-only `pi-orders-archive`
+      # branch (plain fast-forward push, NEVER forced; no secrets beyond the
+      # job's own GITHUB_TOKEN). Runs after the data publish and cannot fail the
+      # job: the snapshot is already out, and a missed hour is a gap, not damage.
+      - name: Append PI orders to archive branch
+        continue-on-error: true
+        run: |
+          set -e
+          f=$(find archive/orders -name '*.json.gz' -type f | head -n 1)
+          [ -n "$f" ] || { echo "no archive file this run"; exit 0; }
+          rel=${f#archive/}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/arch"
+            git worktree prune
+            git worktree add --detach "$RUNNER_TEMP/arch" HEAD
+            if git fetch origin pi-orders-archive --depth=1; then
+              git -C "$RUNNER_TEMP/arch" checkout -q --detach FETCH_HEAD
+            else
+              echo "no pi-orders-archive branch yet — creating orphan"
+              git -C "$RUNNER_TEMP/arch" checkout -q --orphan pi-orders-archive-new
+              git -C "$RUNNER_TEMP/arch" rm -rfq .
+            fi
+            mkdir -p "$RUNNER_TEMP/arch/$(dirname "$rel")"
+            cp "$f" "$RUNNER_TEMP/arch/$rel"
+            git -C "$RUNNER_TEMP/arch" add "$rel"
+            if git -C "$RUNNER_TEMP/arch" diff --cached --quiet; then
+              echo "archive file unchanged"; exit 0
+            fi
+            git -C "$RUNNER_TEMP/arch" commit -q -m "PI orders $(date -u +%Y-%m-%dT%H:%MZ)"
+            if git -C "$RUNNER_TEMP/arch" push origin HEAD:refs/heads/pi-orders-archive; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt), refetching"
+          done
+          exit 1
 
 # End of market-orders.yml
