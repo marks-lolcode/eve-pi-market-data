@@ -67,5 +67,44 @@ class PiFile(unittest.TestCase):
             self.assertEqual(a, open(path, "rb").read())  # deterministic bytes
 
 
+class MalformedOrderIsolated(unittest.TestCase):
+    def test_malformed_order_does_not_change_sweep(self):
+        import contextlib
+        import io
+        import sweep_orders
+
+        calls = []
+
+        def fake_original(acc, orders, now_ts):
+            calls.append(list(orders))
+            acc.append(len(orders))
+            return "orig-result"
+
+        def fake_main():
+            acc = []
+            good = order(1, 2392)
+            bad = {"type_id": 2392, "location_id": STATION}  # missing order_id etc.
+            sweep_orders.accumulate(acc, [good, bad], 0)
+            sweep_orders.accumulate(acc, [good], 0)
+            return (0, acc)
+
+        saved = (sweep_orders.accumulate, sweep_orders.main, pa.load_pi_types, pa.ARCHIVE_DIR)
+        sweep_orders.accumulate = fake_original
+        sweep_orders.main = fake_main
+        pa.load_pi_types = lambda: {2392}
+        err = io.StringIO()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                pa.ARCHIVE_DIR = d
+                with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    rc = pa.main()  # must not raise
+                self.assertFalse(os.path.exists(os.path.join(d, "orders")))  # no partial archive
+        finally:
+            sweep_orders.accumulate, sweep_orders.main, pa.load_pi_types, pa.ARCHIVE_DIR = saved
+        self.assertEqual(rc, (0, [2, 1]))  # identical to an unwrapped sweep
+        self.assertEqual(len(calls), 2)  # original accumulate saw every page
+        self.assertIn("collection FAILED", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -126,16 +126,26 @@ def main():
     collected = []
     original = sweep_orders.accumulate
 
+    failed = []
+
     def accumulate(acc, orders, now_ts):
         # accumulate() is called from the main thread only (pool.map results are
         # consumed there), so a plain list is safe.
-        if type_ids is not None:
-            collected.extend(filter_pi_rows(orders, type_ids, sweep_orders.STATION_ID))
+        # Archive collection is best effort: any error here is logged and
+        # swallowed so the original sweep is never affected. After a failure
+        # collection stops and no (partial) archive is written.
+        if type_ids is not None and not failed:
+            try:
+                collected.extend(filter_pi_rows(orders, type_ids, sweep_orders.STATION_ID))
+            except Exception as e:
+                failed.append(e)
+                print("pi-archive: collection FAILED, archive skipped (snapshot unaffected): %r" % (e,),
+                      file=sys.stderr, flush=True)
         return original(acc, orders, now_ts)
 
     sweep_orders.accumulate = accumulate
     rc = sweep_orders.main()  # raises on any failed page, exactly as before
-    if type_ids is None:
+    if type_ids is None or failed:
         return rc
 
     try:
