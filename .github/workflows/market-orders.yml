@@ -1,4 +1,7 @@
-# market-orders.yml — v1.2 — Last updated 2026-11-14
+# market-orders.yml — v1.3 — Last updated 2026-11-14
+#
+# v1.3: the archive append step no longer has continue-on-error, so a failed append fails the run (after the data publish)
+# and GitHub notifies by email instead of staying green.
 #
 # v1.2: archive step fixed. It checked the fetched branch out in a linked worktree via FETCH_HEAD, which git resolves per
 # worktree, so every run after the first died with "--detach does not take a path argument" (hidden by continue-on-error)
@@ -82,10 +85,13 @@ jobs:
 
       # Appends this hour's PI order dump to the append-only `pi-orders-archive`
       # branch (plain fast-forward push, NEVER forced; no secrets beyond the
-      # job's own GITHUB_TOKEN). Runs after the data publish and cannot fail the
-      # job: the snapshot is already out, and a missed hour is a gap, not damage.
+      # job's own GITHUB_TOKEN). Runs AFTER the data publish, so a failure here
+      # cannot take the snapshot back: it only turns the run red, which makes
+      # GitHub email the repo's notification recipients. It used to be
+      # continue-on-error, and a broken append then went unnoticed for three
+      # weeks (the run stayed green) - a missed hour is a gap in the order
+      # history, which PIX uses for fills and reprices, so it should be loud.
       - name: Append PI orders to archive branch
-        continue-on-error: true
         run: |
           set -e
           f=$(find archive/orders -name '*.json.gz' -type f | head -n 1)
