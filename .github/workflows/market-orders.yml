@@ -1,4 +1,8 @@
-# market-orders.yml — v1.1 — Last updated 2026-08-07
+# market-orders.yml — v1.2 — Last updated 2026-11-14
+#
+# v1.2: archive step fixed. It checked the fetched branch out in a linked worktree via FETCH_HEAD, which git resolves per
+# worktree, so every run after the first died with "--detach does not take a path argument" (hidden by continue-on-error)
+# and pi-orders-archive stayed at one file (2026-10-22). It now resolves the sha first.
 #
 # v1.1: the sweep also publishes jitaDepth.json (20 price levels per side), and
 # a second step narrows the book to reproCandidates.json. Both exist because
@@ -94,7 +98,10 @@ jobs:
             git worktree prune
             git worktree add --detach "$RUNNER_TEMP/arch" HEAD
             if git fetch origin pi-orders-archive --depth=1; then
-              git -C "$RUNNER_TEMP/arch" checkout -q --detach FETCH_HEAD
+              # FETCH_HEAD is a per-worktree ref: the fetch above wrote the MAIN worktree's, so resolve the sha here and
+              # hand the linked worktree a sha (a bare FETCH_HEAD there fails: "--detach does not take a path argument").
+              sha=$(git rev-parse FETCH_HEAD)
+              git -C "$RUNNER_TEMP/arch" checkout -q --detach "$sha"
             else
               echo "no pi-orders-archive branch yet — creating orphan"
               git -C "$RUNNER_TEMP/arch" checkout -q --orphan pi-orders-archive-new
