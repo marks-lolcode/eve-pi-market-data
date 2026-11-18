@@ -129,14 +129,19 @@ Same array-of-arrays shape, `historyColumns` in `meta.json`:
 [typeID, avgDailyVolume, medianPrice]
 ```
 
-Trailing 30 days. Types ESI has no history for are **omitted, not zeroed** —
-"never traded" and "traded nothing today" are different facts.
+`avgDailyVolume` is the units traded in the 30 calendar days before today
+divided by 30 (3 decimals; `historyVolumeBasis: "calendar"` in `meta.json`).
+ESI lists only the days a type traded, so a type that sold once in 30 days
+reads 0.033, not the mean of its last 30 trading days. `medianPrice` is the
+median of the last 30 records. A type with history but no trade in the window
+is published with volume 0. Types ESI has no history for are **omitted, not
+zeroed** — "never traded" and "traded nothing today" are different facts.
 
 ### `meta.json`
 
 Provenance and a freshness stamp for both files: `generatedAt`,
-`historyGeneratedAt`, `types`, `ordersSeen`, `ordersKept`, `pages`, the column
-orders, and sweep durations. Consumers should read this first and skip the
+`historyGeneratedAt`, `historyVolumeBasis`, `types`, `ordersSeen`, `ordersKept`,
+`pages`, the column orders, and sweep durations. Consumers should read this first and skip the
 download when `generatedAt` has not moved.
 
 ### `noHistoryTypes.json`

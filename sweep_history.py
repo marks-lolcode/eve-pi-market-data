@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-# sweep_history.py — v1.1 — Last updated 2026-08-06
+# sweep_history.py — v1.2 — Last updated 2026-11-18
+#
+# v1.2: avgDailyVolume is the units traded in the WINDOW_DAYS CALENDAR days before today (today-WINDOW_DAYS .. yesterday; ESI never lists today) divided by WINDOW_DAYS (3 decimals).
+# ESI omits days with no trades, so the old mean of the last 30 RECORDS overstated thin markets (one sale in 30 days
+# over a record list reaching back a year read as several a day). meta.historyVolumeBasis = "calendar" tells the sheet.
+# medianPrice still uses the last WINDOW_DAYS records. Rows with no trade in the window are kept with volume 0.
 #
 # Trailing-30-day traded volume and median price per type, from ESI's public
 # market history endpoint. One request per type — ~18,800 of them — which is
@@ -19,6 +24,7 @@
 # zero. "Never traded" and "traded zero today" are different facts, and the
 # consumer drops absent types rather than treating them as dead.
 
+import datetime
 import json
 import os
 import statistics
@@ -63,6 +69,7 @@ HISTORY_COLUMNS = ["typeID", "avgDailyVolume", "medianPrice"]
 _gate_lock = threading.Lock()
 _resume_at = 0.0
 _throttle_events = 0
+_bad_date_rows = 0     # history rows skipped for a missing / unparseable date (printed once in the run summary)
 
 
 def _park_if_throttled():
@@ -90,6 +97,32 @@ def _note_limit(headers, throttled=False):
         print("  error budget low (remain=%s) — pausing %ss" % (remain, reset + 1), flush=True)
 
 
+def calendar_avg_volume(data, window_days, today=None):
+    """Units traded per day over the window_days calendar days before today (sum / window_days, 3 decimals).
+
+    The window is today-window_days .. yesterday: exactly window_days dates, today excluded (ESI never lists it).
+    ESI history lists only the days a type traded, so dividing by the record count overstates a thin market.
+    A row with a missing / unparseable date is skipped and counted in _bad_date_rows; a missing volume counts as 0.
+    """
+    global _bad_date_rows
+    today = today or datetime.datetime.now(datetime.timezone.utc).date()
+    cutoff = today - datetime.timedelta(days=window_days)
+    total = 0
+    bad = 0
+    for d in data:
+        try:
+            day = datetime.date.fromisoformat(d["date"])
+        except (KeyError, TypeError, ValueError):
+            bad += 1
+            continue
+        if cutoff <= day < today:
+            total += d.get("volume") or 0
+    if bad:
+        with _gate_lock:
+            _bad_date_rows += bad
+    return round(total / float(window_days), 3)
+
+
 def fetch_history(type_id, retries=5):
     """Trailing-window [typeID, avgDailyVolume, medianPrice], or a failure marker.
 
@@ -112,9 +145,9 @@ def fetch_history(type_id, retries=5):
             if not data:
                 return None
             window = data[-WINDOW_DAYS:]
-            avg_volume = sum(d["volume"] for d in window) / float(len(window))
+            avg_volume = calendar_avg_volume(data, WINDOW_DAYS)
             median_price = statistics.median(d["average"] for d in window)
-            return [type_id, round(avg_volume, 1), round(median_price, 2)]
+            return [type_id, avg_volume, round(median_price, 2)]
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return None
@@ -181,8 +214,8 @@ def main():
     with open(os.path.join(OUT_DIR, "noHistoryTypes.json"), "w") as f:
         json.dump(still_empty, f, separators=(",", ":"))
 
-    print("usable=%d noHistory=%d failed=%d throttleEvents=%d knownEmptyCarried=%d" % (
-        len(rows), no_history, failed, _throttle_events, len(still_empty)), flush=True)
+    print("usable=%d noHistory=%d failed=%d throttleEvents=%d knownEmptyCarried=%d badDateRows=%d" % (
+        len(rows), no_history, failed, _throttle_events, len(still_empty), _bad_date_rows), flush=True)
 
     # A failure is not the same as "no history": failures are ESI refusing us,
     # and downstream they are indistinguishable from an untraded item. Past a
@@ -220,6 +253,7 @@ def main():
         "historyFailed": failed,
         "historyThrottleEvents": _throttle_events,
         "historyWindowDays": WINDOW_DAYS,
+        "historyVolumeBasis": "calendar",
         "historyColumns": HISTORY_COLUMNS,
         "historySeconds": round(time.time() - started, 1),
     })
